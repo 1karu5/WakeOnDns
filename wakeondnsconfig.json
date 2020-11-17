@@ -1,0 +1,8 @@
+{
+  "interfaceIP": "192.168.0.1",
+  "broadcastIP": "192.168.0.255",
+  "wakeupMap":
+  {
+    "my.dns.name": "00:00:00:00:00:00"
+  }
+}

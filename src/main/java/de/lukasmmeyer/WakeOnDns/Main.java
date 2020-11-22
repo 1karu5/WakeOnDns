@@ -1,20 +1,17 @@
 package de.lukasmmeyer.WakeOnDns;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 import org.pcap4j.core.*;
-import org.pcap4j.packet.*;
-import org.pcap4j.util.MacAddress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,70 +21,82 @@ public class Main {
 
     private static final Logger LOG = LoggerFactory.getLogger(Main.class);
 
-    private static final int READ_TIMEOUT = 10; // [ms]
-    private static final int SNAPLEN = 65536; // [bytes]
+    private static List<NetworkInterfaceListener> listeners;
 
-    private static PcapNetworkInterface getDevByIp(String ip) {
+    public static void shutdownListeners() {
+        LOG.info("Shutdown listeners...");
+        for (NetworkInterfaceListener listener : listeners) {
+            listener.interrupt();
+        }
+        waitForListeners(5000);
+        LOG.info("All listeners stopped!");
+    }
+
+    public static void waitForListeners() {
+        waitForListeners(0);
+    }
+
+    public static void waitForListeners(long timeout) {
+        for (NetworkInterfaceListener listener : listeners) {
+            try {
+                listener.join(timeout);
+            } catch (InterruptedException ignored) {
+            }
+        }
+    }
+
+    private static boolean isIP(String interfaceDescription) {
         try {
-            List<PcapNetworkInterface> devs = Pcaps.findAllDevs();
-            for (PcapNetworkInterface dev : devs) {
-                List<InetAddress> ips = dev.getAddresses().stream().map(PcapAddress::getAddress).collect(Collectors.toList());
-                if (ips.contains(InetAddress.getByName(ip))) {
-                    return dev;
+            if (interfaceDescription.isEmpty()) {
+                return false;
+            }
+            String[] parts = interfaceDescription.split("\\.");
+            if (parts.length != 4) {
+                return false;
+            }
+            for (String s : parts) {
+                int i = Integer.parseInt(s);
+                if ((i < 0) || (i > 255)) {
+                    return false;
                 }
             }
-        } catch (PcapNativeException | UnknownHostException e) {
-            LOG.error(e.getMessage(), e);
+            return !interfaceDescription.endsWith(".");
+        } catch (NumberFormatException nfe) {
+            return false;
+        }
+    }
+
+
+    private static PcapNetworkInterface getDevByIp(List<PcapNetworkInterface> allDevices, String ip) throws UnknownHostException {
+        for (PcapNetworkInterface dev : allDevices) {
+            List<InetAddress> ips = dev.getAddresses().stream().map(PcapAddress::getAddress).collect(Collectors.toList());
+            if (ips.contains(InetAddress.getByName(ip))) {
+                return dev;
+            }
         }
         return null;
     }
 
-    private static DnsPacket getDNSPacket(Packet p) {
-        Packet payload = p;
-
-        while (payload.getPayload() != null && !(payload instanceof DnsPacket)) {
-            payload = payload.getPayload();
-        }
-        if (payload instanceof DnsPacket) {
-            return (DnsPacket) payload;
+    private static PcapNetworkInterface getDevByName(List<PcapNetworkInterface> allDevices, String interfaceDescription) {
+        for (PcapNetworkInterface dev : allDevices) {
+            if (dev.getName().toLowerCase().equals(interfaceDescription.toLowerCase())) {
+                return dev;
+            }
         }
         return null;
     }
 
-    private static byte[] buildMagicPaket(MacAddress dstAddr, byte[] password) {
-        byte[] macBytes = dstAddr.getAddress();
-        byte[] rawData = new byte[6 + (16 * macBytes.length) + password.length];
 
-        for (int i = 0; i < 6; i++) {
-            rawData[i] = (byte) 0xff;
-        }
-        for (int i = 6; i <= (16 * macBytes.length); i += macBytes.length) {
-            System.arraycopy(macBytes, 0, rawData, i, macBytes.length);
-        }
-        System.arraycopy(password, 0, rawData, (16 * macBytes.length), password.length);
-
-        return rawData;
-    }
-
-    private static void wakeEmUp(String broadcastIP, MacAddress dstAddr, byte[] password) throws IOException {
-        byte[] packetBytes = buildMagicPaket(dstAddr, password);
-        InetAddress address = InetAddress.getByName(broadcastIP);
-        DatagramPacket packet = new DatagramPacket(packetBytes, packetBytes.length, address, 9);
-        DatagramSocket socket = new DatagramSocket();
-        socket.send(packet);
-        socket.close();
-    }
-
-    public static void main(String[] args) throws PcapNativeException, NotOpenException, InterruptedException, FileNotFoundException {
+    public static void main(String[] args) throws PcapNativeException, FileNotFoundException, UnknownHostException {
 
         if (args.length != 1) {
             LOG.error("Wrong arguments! Specify only config path!");
         }
 
-        LOG.warn("Starting...read config");
+        LOG.info("Starting...read config...");
 
         JSONObject config = new JSONObject(new JSONTokener(new FileInputStream(args[0])));
-        String interfaceIP = config.getString("interfaceIP");
+        JSONArray jsonInterfaces = config.getJSONArray("interfaces");
         String broadcastIP = config.getString("broadcastIP");
 
         JSONObject jsonWakeupMap = config.getJSONObject("wakeupMap");
@@ -105,39 +114,57 @@ public class Main {
             wakeupMap.put(key, value);
         }
 
-        LOG.warn("interfaceIP: {} broadcastIP: {}", interfaceIP, broadcastIP);
+        List<PcapNetworkInterface> allDevices = Pcaps.findAllDevs();
 
-        PcapNetworkInterface dev = getDevByIp(interfaceIP);
+        List<PcapNetworkInterface> devices = new ArrayList<>(jsonInterfaces.length());
+        for (Object i : jsonInterfaces) {
+            if (!(i instanceof String)) {
+                LOG.error("Bad config format in 'interfaces'. Needs to be string array!");
+                System.exit(1);
+            }
+            String interfaceDescription = (String) i;
+            PcapNetworkInterface device;
+            if (isIP(interfaceDescription)) {
+                device = getDevByIp(allDevices, interfaceDescription);
+            } else {
+                device = getDevByName(allDevices, interfaceDescription);
+            }
 
-        if (dev == null) {
-            LOG.error("NO INTERFACE FOUND!");
-            return;
+            if (device != null) {
+                LOG.info("Added '{}'", device.getName());
+                devices.add(device);
+            } else {
+                LOG.error("No device found for '{}'", interfaceDescription);
+            }
         }
 
-        PcapHandle pcapHandle = dev.openLive(SNAPLEN, PcapNetworkInterface.PromiscuousMode.PROMISCUOUS, READ_TIMEOUT);
+        if (devices.isEmpty()) {
+            LOG.error("No devices found!");
+            System.exit(1);
+        }
 
-        pcapHandle.setFilter("udp and port 53", BpfProgram.BpfCompileMode.OPTIMIZE);
+        LOG.info("Will send WOL pakets to: {}", broadcastIP);
 
-        pcapHandle.loop(-1, (PacketListener) packet -> {
-            DnsPacket dns = getDNSPacket(packet);
-            if (dns != null && !dns.getHeader().isResponse()) {
-                LOG.debug("Process package...");
-                List<DnsQuestion> questions = dns.getHeader().getQuestions();
-                for (DnsQuestion q : questions) {
-                    String askedForName = q.getQName().getName();
-                    LOG.debug("Asked for: {}", askedForName);
-                    if (wakeupMap.containsKey(askedForName)) {
-                        byte[] toMac = wakeupMap.get(askedForName);
-                        LOG.warn("Found match, send WOL: {} {}", askedForName, toMac);
-                        try {
-                            wakeEmUp(broadcastIP, MacAddress.getByAddress(toMac), new byte[]{});
-                        } catch (IOException e) {
-                            LOG.error(e.getMessage(), e);
-                        }
-                    }
-                }
-                LOG.debug("Process done!");
-            }
-        });
+        WakeEmUp waker = new WakeEmUp(broadcastIP, wakeupMap);
+
+        Thread.UncaughtExceptionHandler uncaughtExceptionHandler = (th, ex) -> {
+            LOG.error("Error in {}", th.getName());
+            LOG.error(ex.getMessage(), ex);
+            shutdownListeners();
+        };
+
+        listeners = new ArrayList<>(devices.size());
+        for (PcapNetworkInterface dev : devices) {
+            NetworkInterfaceListener listener = new NetworkInterfaceListener(dev, waker);
+            listeners.add(listener);
+            listener.setUncaughtExceptionHandler(uncaughtExceptionHandler);
+            listener.start();
+        }
+
+        Runtime.getRuntime().addShutdownHook(new Thread(Main::shutdownListeners));
+
+        waitForListeners();
+
+        LOG.info("Finished");
     }
 }

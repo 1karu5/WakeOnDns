@@ -22,11 +22,10 @@ public class WakeEmUp {
         this.wakeupMap = wakeupMap;
     }
 
-    public synchronized void wakeUpIfNecessary(String dnsName) {
-        LOG.debug("Asked for: {}", dnsName);
-        if (wakeupMap.containsKey(dnsName)) {
-            byte[] toMac = wakeupMap.get(dnsName);
-            LOG.info("Found match, send WOL: {} {}", dnsName, macToString(toMac));
+    public synchronized void wakeUpIfNecessary(String askedForName, String srcAddress) {
+        if (wakeupMap.containsKey(askedForName)) {
+            byte[] toMac = wakeupMap.get(askedForName);
+            LOG.info("{} want to access {}: Sending WOL to {}", srcAddress, askedForName, macToString(toMac));
             try {
                 wakeEmUp(broadcastIP, MacAddress.getByAddress(toMac), new byte[]{});
             } catch (IOException e) {

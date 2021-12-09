@@ -1,9 +1,7 @@
 package de.lukasmmeyer.WakeOnDns;
 
 import org.pcap4j.core.*;
-import org.pcap4j.packet.DnsPacket;
-import org.pcap4j.packet.DnsQuestion;
-import org.pcap4j.packet.Packet;
+import org.pcap4j.packet.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,18 +24,6 @@ public class NetworkInterfaceListener extends Thread {
         this.setName("NetworkInterfaceListener " + dev.getName());
     }
 
-    private DnsPacket getDNSPacket(Packet p) {
-        Packet payload = p;
-
-        while (payload.getPayload() != null && !(payload instanceof DnsPacket)) {
-            payload = payload.getPayload();
-        }
-        if (payload instanceof DnsPacket) {
-            return (DnsPacket) payload;
-        }
-        return null;
-    }
-
     @Override
     public void run() {
         LOG.info("Listening on {}", device.getName());
@@ -46,14 +32,25 @@ public class NetworkInterfaceListener extends Thread {
             pcapHandle.setFilter("udp and port 53", BpfProgram.BpfCompileMode.OPTIMIZE);
 
             pcapHandle.loop(-1, (PacketListener) packet -> {
-                DnsPacket dns = getDNSPacket(packet);
-                if (dns != null && !dns.getHeader().isResponse()) {
+                IpV4Packet ipV4Packet = packet.get(IpV4Packet.class);
+                IpV6Packet ipV6Packet = packet.get(IpV6Packet.class);
+                DnsPacket dnsPacket = packet.get(DnsPacket.class);
+                String srcAddress = "unknown";
+
+                if(ipV4Packet != null){
+                    srcAddress = ipV4Packet.getHeader().getSrcAddr().toString();
+                } else if(ipV6Packet != null){
+                    srcAddress = ipV6Packet.getHeader().getSrcAddr().toString();
+                }
+                if (dnsPacket != null && !dnsPacket.getHeader().isResponse()) {
                     LOG.debug("Process package...");
-                    List<DnsQuestion> questions = dns.getHeader().getQuestions();
+
+                    List<DnsQuestion> questions = dnsPacket.getHeader().getQuestions();
                     for (DnsQuestion q : questions) {
                         String askedForName = q.getQName().getName();
-                        this.waker.wakeUpIfNecessary(askedForName);
+                        this.waker.wakeUpIfNecessary(askedForName, srcAddress);
                     }
+
                     LOG.debug("Process done!");
                 }
             });
